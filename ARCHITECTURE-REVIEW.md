@@ -7,17 +7,42 @@
 
 ## O Problema
 
-A Vivianne tem 4 produtos digitais activos (Sete Ecos, ANIMA, Os Sete Véus, PITCH) e precisa de uma cabine de pilotagem para:
+A Vivianne tem 4 produtos digitais activos, cada um com o **seu próprio Supabase e Vercel**. Precisa de uma cabine de pilotagem (PWA) que:
 
 1. **Messenger** — clientes escrevem dentro do Sete Ecos, ela responde pelo HUB. Substitui o WhatsApp.
-2. **Feed em tempo real** — tudo o que acontece nos produtos aparece aqui.
+2. **Feed em tempo real** — tudo o que acontece nos 4 produtos aparece aqui.
 3. **Acções rápidas** — lembrar cliente, dar feedback, ver perfil — tudo com um toque.
 4. **Resumo diário** — quem registou, quem não registou, quem precisa de atenção.
 5. **Autenticação exclusiva** — só ela entra.
 
 ---
 
-## Estado Actual (~1,450 linhas de código)
+## Facto Crítico: 4 Supabase Independentes
+
+Cada produto tem o seu **próprio projecto Supabase** com o seu próprio auth, as suas próprias tabelas, e os seus próprios IDs de utilizador. Isto significa:
+
+- **Não há JOINs directos** entre produtos
+- **user_id é diferente** em cada projecto — o mesmo email tem IDs diferentes
+- **Match entre produtos é por email** (único campo comum)
+- O HUB precisa de **4 clientes Supabase** (um por produto)
+- O HUB autentica a Vivianne **no Supabase do Sete Ecos** (o principal) e usa as **anon keys** dos outros para queries read-only
+- **Real-time** funciona apenas nos Supabase onde a Vivianne tem sessão (Sete Ecos para já)
+- Para real-time nos outros produtos: ou a Vivianne tem conta coach em cada Supabase, ou usamos polling
+
+### Implicações na arquitectura
+
+| Aspecto | Antes (1 Supabase) | Agora (4 Supabase) |
+|---------|--------------------|--------------------|
+| Queries | 1 client, JOINs | 4 clients, merge no frontend |
+| Auth | 1 login | 1 login principal + anon keys |
+| Real-time | Channels em tudo | Channels no Sete Ecos, polling nos outros |
+| Clientes unificados | JOIN por user_id | Merge por email |
+| Env vars | 2 (URL + key) | 8 (2 por produto) |
+| RLS | is_coach() num sítio | is_coach() em 4 sítios |
+
+---
+
+## Estado Actual (~1,450 LOC)
 
 ### O que funciona
 
@@ -42,12 +67,13 @@ A Vivianne tem 4 produtos digitais activos (Sete Ecos, ANIMA, Os Sete Véus, PIT
 | **0 dados de ANIMA** | Não vê sessões IA, padrões, streaks, fases |
 | **0 dados de Os Sete Véus** | Não vê pagamentos pendentes, códigos, leitoras |
 | **0 dados de PITCH** | Não vê progresso do Breno |
+| **Só 1 Supabase client** | Não liga aos outros 3 produtos |
 | **Messenger só texto** | Sem imagens, áudio, ficheiros |
 | **Feed só Sete Ecos** | Não vê eventos de ANIMA/Véus/PITCH |
-| **Sem alertas accionáveis** | Alerta aparece no feed mas não se pode marcar como lido/resolvido |
-| **Sem KPIs de receita** | MRR não calculado para nenhum produto |
+| **Sem alertas accionáveis** | Aparece no feed mas não se pode marcar lido/resolvido |
+| **Sem KPIs de receita** | MRR não calculado |
 | **Sem gráficos** | Tudo é texto e contadores |
-| **Sem resumo diário automático** | Não existe o "resumo às 20h" |
+| **Sem resumo diário** | Não existe o "resumo às 20h" |
 | **Sem notas da coach** | Não pode guardar notas por cliente |
 | **Sem paginação** | Tudo carrega de uma vez |
 | **Sem error handling** | Real-time falha silenciosamente |
@@ -58,381 +84,317 @@ A Vivianne tem 4 produtos digitais activos (Sete Ecos, ANIMA, Os Sete Véus, PIT
 
 ### Princípios
 
-1. **Um ecrã, uma decisão** — cada página responde a uma pergunta da Vivianne
-2. **Agregação, não duplicação** — um cliente com Sete Ecos + ANIMA aparece uma vez
-3. **Feed universal** — todos os produtos alimentam o mesmo feed
-4. **Acções inline** — responder, marcar, lembrar — sem navegar
+1. **4 clients, 1 interface** — um Supabase client por produto, dados fundidos no frontend
+2. **Email = chave universal** — é o único campo que liga um cliente entre produtos
+3. **Sete Ecos é o "principal"** — auth, messenger e real-time vivem aqui
+4. **Outros são read-only** — o HUB lê dados de ANIMA, Véus e PITCH mas não escreve
 5. **Mobile-first** — tudo funciona no telemóvel da Vivianne
 
-### Rotas (proposta)
+### Env vars necessárias
+
+```env
+# Sete Ecos (principal — auth + messenger + real-time)
+VITE_SUPABASE_URL=https://vvvdtogvlutrybultffx.supabase.co
+VITE_SUPABASE_ANON_KEY=...
+
+# ANIMA (read-only)
+VITE_ANIMA_SUPABASE_URL=https://XXXX.supabase.co
+VITE_ANIMA_SUPABASE_ANON_KEY=...
+
+# Os Sete Véus (read-only)
+VITE_VEUS_SUPABASE_URL=https://XXXX.supabase.co
+VITE_VEUS_SUPABASE_ANON_KEY=...
+
+# PITCH (read-only)
+VITE_PITCH_SUPABASE_URL=https://XXXX.supabase.co
+VITE_PITCH_SUPABASE_ANON_KEY=...
+```
+
+### Multi-client Supabase
+
+```typescript
+// lib/supabase.ts — expandido para 4 clients
+
+// Principal (Sete Ecos) — auth + full access
+export const supabase = createClient(SETE_ECOS_URL, SETE_ECOS_KEY, {
+  auth: { persistSession: true, storageKey: 'hub-auth' }
+})
+
+// ANIMA — read-only, sem auth próprio
+export const animaDb = createClient(ANIMA_URL, ANIMA_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false }
+})
+
+// Os Sete Véus — read-only, sem auth próprio
+export const veusDb = createClient(VEUS_URL, VEUS_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false }
+})
+
+// PITCH — read-only, sem auth próprio
+export const pitchDb = createClient(PITCH_URL, PITCH_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false }
+})
+```
+
+**NOTA IMPORTANTE sobre RLS:**
+- Sem auth nos clients secundários, as queries usam a **anon key**
+- As tabelas precisam de ter **RLS policies que permitam leitura pela anon key** OU
+- A Vivianne precisa de ter **conta coach criada em cada Supabase** e fazer sign-in em todos
+- **Alternativa mais simples**: Criar uma policy `is_hub_read()` que permita SELECT pela anon key com um header custom, ou usar **service role key** (menos seguro mas funcional)
+
+### A melhor abordagem para RLS cross-project
+
+**Opção A — Service Role Key (simples, menos seguro):**
+- Usar a service_role key de cada projecto no HUB
+- Bypassa RLS completamente
+- Risco: se a key vazar, acesso total
+- OK para uma app que só a Vivianne usa
+
+**Opção B — Conta coach em cada Supabase (mais seguro):**
+- Criar conta com email da Vivianne em cada Supabase
+- Sign-in em paralelo nos 4 clients no login do HUB
+- Cada projecto tem policy is_coach() que reconhece o email
+- Mais seguro, mais complexo
+
+**Opção C — API intermediária (mais robusto):**
+- Criar edge functions em cada Supabase que servem dados para o HUB
+- O HUB chama as functions com um token/secret
+- Melhor separação, mais trabalho inicial
+
+**Recomendação**: Opção B para começar — é segura e não precisa de infra extra. A Vivianne faz login uma vez, o HUB autentica nos 4 Supabase em paralelo.
+
+---
+
+## Rotas
 
 ```
-/login              → Login.tsx (mantém)
-/                   → Feed.tsx (feed universal, home)
-/messenger          → Messenger.tsx (lista de conversas)
+/login              → Login.tsx (auth nos 4 Supabase)
+/                   → Feed.tsx (feed universal)
+/messenger          → Messenger.tsx (lista de conversas — Sete Ecos)
 /messenger/:id      → Chat.tsx (chat individual)
 /clients            → Clients.tsx (directório unificado cross-produto)
-/clients/:id        → ClientDetail.tsx (perfil completo cross-produto)
-/summary            → Summary.tsx (dashboard com KPIs e resumo diário)
-/settings           → Settings.tsx (NOVO - configurações, notificações)
+/clients/:email     → ClientDetail.tsx (perfil por email, não por ID)
+/summary            → Summary.tsx (KPIs dos 4 produtos)
 ```
 
-### Estrutura de ficheiros (proposta)
+**Nota**: ClientDetail usa `:email` em vez de `:id` porque o ID é diferente em cada Supabase. O email é a chave universal.
+
+---
+
+## Estrutura de ficheiros
 
 ```
 src/
   App.tsx
   main.tsx
   components/
-    Shell.tsx                    # Layout + bottom nav (mantém, melhorar)
-    StatCard.tsx                 # Card de KPI reutilizável (extrair do Summary)
-    EventCard.tsx                # Card de evento no feed (extrair do Feed)
-    ConversationRow.tsx          # Row de conversa (extrair do Messenger)
-    ProductBadge.tsx             # Badge de produto (Sete Ecos/ANIMA/Véus/PITCH)
-    AlertActions.tsx             # NOVO — marcar lido/resolvido inline
-    ClientCard.tsx               # Card de cliente na lista
+    Shell.tsx                    # Layout + bottom nav
+    ProductBadge.tsx             # Badge: Sete Ecos / ANIMA / Véus / PITCH
   contexts/
-    AuthContext.tsx               # Mantém
+    AuthContext.tsx               # Auth nos 4 Supabase + isCoach guard
   hooks/
-    useUnreadCount.ts            # Mantém
-    useRealtimeFeed.ts           # NOVO — feed universal com subscriptions multi-produto
-    useClients.ts                # NOVO — aggregação de clientes cross-produto
+    useUnreadCount.ts            # Mantém (Sete Ecos)
   lib/
-    supabase.ts                  # Mantém
+    supabase.ts                  # 4 Supabase clients
     coach.ts                     # Mantém
-    activity.ts                  # REESCREVER — feed universal (4 produtos)
-    messenger.ts                 # Mantém + expandir (media, archive)
-    clients.ts                   # NOVO — queries unificadas de clientes
-    anima.ts                     # NOVO — queries ANIMA
-    sete-veus.ts                 # NOVO — queries Os Sete Véus
-    pitch.ts                     # NOVO — queries PITCH
-    alerts.ts                    # NOVO — gestão de alertas (CRUD)
-    kpis.ts                      # NOVO — cálculos de KPIs por produto
+    activity.ts                  # Feed: Sete Ecos (real-time) + outros (polling)
+    messenger.ts                 # Mantém (só Sete Ecos)
+    anima.ts                     # NOVO — queries read-only ao Supabase ANIMA
+    sete-veus.ts                 # NOVO — queries read-only ao Supabase Véus
+    pitch.ts                     # NOVO — queries read-only ao Supabase PITCH
+    clients.ts                   # NOVO — merge de clientes por email
   types/
-    database.ts                  # EXPANDIR — tipos para os 4 produtos
+    database.ts                  # Expandir com tipos ANIMA, Véus, PITCH
   pages/
-    Login.tsx                    # Mantém
-    Feed.tsx                     # REESCREVER — feed universal
+    Login.tsx                    # Auth multi-Supabase
+    Feed.tsx                     # Feed universal
     Messenger.tsx                # Mantém
-    Chat.tsx                     # Expandir (media)
-    Clients.tsx                  # REESCREVER — cross-produto
-    ClientDetail.tsx             # REESCREVER — dados de todos os produtos
-    Summary.tsx                  # REESCREVER — KPIs dos 4 produtos
-    Settings.tsx                 # NOVO
+    Chat.tsx                     # Mantém
+    Clients.tsx                  # Directório unificado
+    ClientDetail.tsx             # Perfil cross-produto (por email)
+    Summary.tsx                  # KPIs dos 4 produtos
+  styles/
+    app.css
 ```
 
 ---
 
-## Feed Universal — Como Deve Funcionar
+## Como funciona o merge de clientes por email
 
-O feed agrega eventos de todos os produtos num único stream ordenado por timestamp.
+```typescript
+// lib/clients.ts
 
-### Fontes de eventos
+interface UnifiedClient {
+  email: string
+  nome: string | null
+  produtos: ('sete_ecos' | 'anima' | 'veus' | 'pitch')[]
 
-| Produto | Tabela | Evento | Prioridade |
-|---------|--------|--------|-----------|
-| Sete Ecos | vitalis_alerts | INSERT | Depende do tipo_alerta |
-| Sete Ecos | vitalis_checkins | INSERT | low |
-| Sete Ecos | messenger_messages | INSERT (sender_type=user) | medium |
-| ANIMA | subscription_events | INSERT (cancelled/payment_failed) | critical |
-| ANIMA | user_insights | INSERT (type=breakthrough) | medium |
-| ANIMA | user_sessions | UPDATE (status=completed) | low |
-| ANIMA | user_streaks | UPDATE (current_streak=0) | high |
-| Sete Véus | payments | INSERT (status=pending) | critical |
-| Sete Véus | livro_code_requests | INSERT (status=pending) | high |
-| Sete Véus | reading_progress | UPDATE (completed=true) — último capítulo do espelho | medium |
-| PITCH | profile_shares | INSERT (role=therapist) | medium |
-
-### Real-time channels (proposta)
-
-```
-hub-activity-sete-ecos    → vitalis_alerts, messenger_messages, vitalis_checkins
-hub-activity-anima        → subscription_events, user_insights, user_sessions, user_streaks
-hub-activity-veus         → payments, livro_code_requests, reading_progress
-hub-activity-pitch        → profile_shares
-```
-
-### Filtros no feed
-
-- Por produto: Todos / Sete Ecos / ANIMA / Véus / PITCH
-- Por prioridade: Todos / Crítico+Alto / Só crítico
-- Por tipo: Alertas / Mensagens / Actividade
-
----
-
-## Directório de Clientes — Como Deve Funcionar
-
-### Problema actual
-
-A mesma pessoa pode estar em múltiplos produtos. O email `joana@gmail.com` pode ser:
-- vitalis_clients (Sete Ecos) — via users.id
-- users na ANIMA — mesmo email, ID diferente (projecto Supabase separado? ou o mesmo?)
-- profiles nos Sete Véus — mesmo email, tabela diferente
-
-### Questão crítica: É o mesmo Supabase project ou são diferentes?
-
-**Se é o MESMO projecto** (mesmo `vvvdtogvlutrybultffx`):
-- users.id é o mesmo em todas as tabelas
-- JOIN directo entre vitalis_clients, user_journey, profiles, profile_shares
-- Solução simples: uma query com LEFT JOINs
-
-**Se são projectos DIFERENTES**:
-- Cada produto tem o seu próprio auth
-- Match por email (não por ID)
-- O HUB precisa de queries a múltiplos Supabase clients
-- Muito mais complexo
-
-**Baseado no CLAUDE.md**: Diz "Todos partilham o mesmo Supabase project" — logo, é o mesmo. Mas ANIMA tem `config.toml` com `project_id = 'anima'` e Os Sete Véus usa `profiles` em vez de `users`. Precisa de confirmação.
-
-### Estrutura do directório (assumindo mesmo Supabase)
-
-```
-Cliente unificado = {
-  // Base (users)
-  id, email, nome, genero, created_at
-
-  // Sete Ecos (vitalis_clients)
   seteEcos?: {
-    status, fase_actual, peso_actual, peso_meta, ultimo_checkin, alertas_pendentes
+    user_id: string
+    status: string
+    fase_actual: string
+    peso_actual: number | null
+    peso_meta: number | null
+    ultimo_checkin: string | null
+    alertas_pendentes: number
   }
 
-  // ANIMA (user_journey + user_streaks)
   anima?: {
-    tier, current_phase, total_conversations, current_streak, last_session_date
+    user_id: string
+    tier: string
+    current_phase: string
+    total_conversations: number
+    current_streak: number
+    last_session_date: string | null
   }
 
-  // Os Sete Véus (profiles + reading_progress)
-  seteVeus?: {
-    has_book_access, has_mirrors_access, capitulos_lidos, ultimo_lido
+  veus?: {
+    user_id: string
+    has_book_access: boolean
+    has_mirrors_access: boolean
+    capitulos_lidos: number
+    pagamentos_pendentes: number
   }
 
-  // PITCH (profile_shares)
   pitch?: {
-    criancas_partilhadas, ultima_sincronizacao
+    user_id: string
+    criancas: number
+    ultima_sync: string | null
   }
+}
+
+async function getAllClients(): Promise<UnifiedClient[]> {
+  // Fetch em paralelo dos 4 Supabase
+  const [seteEcosClients, animaClients, veusClients, pitchClients] =
+    await Promise.all([
+      fetchSeteEcosClients(),   // supabase.from('users')...
+      fetchAnimaClients(),       // animaDb.from('users')...
+      fetchVeusClients(),        // veusDb.from('profiles')...
+      fetchPitchClients(),       // pitchDb.from('profile_shares')...
+    ])
+
+  // Merge por email
+  const byEmail = new Map<string, UnifiedClient>()
+
+  for (const c of seteEcosClients) {
+    const existing = byEmail.get(c.email) || createEmpty(c.email)
+    existing.nome = existing.nome || c.nome
+    existing.seteEcos = c
+    existing.produtos.push('sete_ecos')
+    byEmail.set(c.email, existing)
+  }
+
+  // ... mesmo para anima, veus, pitch
+
+  return Array.from(byEmail.values())
 }
 ```
 
-### Filtros na lista
+---
 
-- Por produto: Todos / Sete Ecos / ANIMA / Véus / PITCH
-- Por status: Activos / Trial / Pendentes / Expirados
-- Por actividade: Activos hoje / Inactivos 7d / Inactivos 30d
+## Feed Universal
+
+### Sete Ecos — Real-time (WebSockets)
+Funciona como hoje: subscriptions em vitalis_alerts, messenger_messages, vitalis_checkins.
+
+### ANIMA, Véus, PITCH — Polling (30s interval)
+Sem auth real-time nos Supabase secundários, usamos polling:
+
+```typescript
+// Fetch eventos recentes a cada 30 segundos
+useEffect(() => {
+  const interval = setInterval(async () => {
+    const animaEvents = await fetchAnimaRecentEvents()  // últimos 5 min
+    const veusEvents = await fetchVeusRecentEvents()
+    const pitchEvents = await fetchPitchRecentEvents()
+    mergeIntoFeed(animaEvents, veusEvents, pitchEvents)
+  }, 30_000)
+  return () => clearInterval(interval)
+}, [])
+```
+
+**No futuro**: se a Vivianne tiver conta coach em cada Supabase, pode-se activar real-time em todos.
 
 ---
 
-## Perfil de Cliente — Como Deve Funcionar
+## RLS — O que precisa de ser criado
 
-O ClientDetail mostra TUDO sobre um cliente, organizado por tabs ou secções:
+### Em cada Supabase secundário (ANIMA, Véus, PITCH)
 
-### Secção 1: Cabeçalho
-- Nome, email, avatar (iniciais)
-- Badges dos produtos activos
-- Botão "Enviar mensagem"
-- Botão "Adicionar nota"
+A função `is_coach()` precisa de existir em cada projecto:
 
-### Secção 2: Sete Ecos (se aplicável)
-- Fase, status, peso actual/meta/perdido
-- Últimos 5 checkins (peso + humor + energia)
-- Alertas pendentes (com acção inline)
-- Link para plano alimentar
+```sql
+-- Correr no SQL Editor de CADA Supabase (ANIMA, Véus, PITCH)
+CREATE OR REPLACE FUNCTION is_coach() RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN (
+    SELECT email FROM auth.users WHERE id = auth.uid()
+  ) IN ('viv.saraiva@gmail.com', 'vivnasc@gmail.com', 'vivianne.saraiva@outlook.com');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+```
 
-### Secção 3: ANIMA (se aplicável)
-- Fase da jornada, tier
-- Conversas por mirror (SOMA/SEREN/LUMA/ECHO/NEXUS)
-- Sessões completadas (X/35)
-- Streak actual
-- Últimos padrões detectados
+Depois, policies SELECT em todas as tabelas que o HUB precisa de ler.
 
-### Secção 4: Os Sete Véus (se aplicável)
-- Flags de acesso
-- Progresso por espelho (capítulos lidos)
-- Pagamentos pendentes
-- Códigos usados
-
-### Secção 5: PITCH (se aplicável)
-- Crianças partilhadas (nome, estrelas, fase)
-- Última sincronização
-
-### Secção 6: Conversas
-- Lista de conversas activas com preview
-- Quick-reply inline
-
-### Secção 7: Notas da coach
-- Timeline de notas (NOVO — precisa de tabela `coach_notes`)
+**SQL completo por produto**: ver ficheiro `supabase/hub_rls_anima.sql`, `supabase/hub_rls_veus.sql`, `supabase/hub_rls_pitch.sql` (a criar).
 
 ---
 
-## Dashboard / Resumo — Como Deve Funcionar
+## O que a Vivianne precisa de fornecer
 
-### KPIs Globais (topo)
-| KPI | Query |
-|-----|-------|
-| Clientes activos (total) | COUNT DISTINCT de todas as client tables com status activo |
-| Mensagens não lidas | SUM(unread_coach) de messenger_conversations |
-| Alertas pendentes | COUNT de vitalis_alerts WHERE status='pendente' |
-| MRR total | Sete Ecos MRR + ANIMA MRR |
+Antes de eu poder escrever código que funcione:
 
-### Por Produto (tabs ou secções)
+### 1. URLs e Anon Keys dos outros Supabase
 
-**Sete Ecos:**
-- Checkins hoje / semana
-- Peso perdido esta semana (agregado)
-- Top 5 perda de peso
-- Clientes sem checkin (>3 dias)
-- MRR: count por tier × preço MZN
+| Produto | Preciso de |
+|---------|-----------|
+| ANIMA | SUPABASE_URL + ANON_KEY |
+| Os Sete Véus | SUPABASE_URL + ANON_KEY |
+| PITCH | SUPABASE_URL + ANON_KEY |
 
-**ANIMA:**
-- Sessões completadas esta semana
-- Clientes por fase (foundation/regulation/expansion/integration/complete)
-- Streaks médios
-- Padrões mais comuns
-- MRR: count por tier × preço EUR
+### 2. Conta coach nos outros Supabase
 
-**Os Sete Véus:**
-- Leitoras activas esta semana
-- Capítulos lidos
-- Pagamentos pendentes (valor + count)
-- Códigos pendentes
-- Receita confirmada vs pendente
+A Vivianne precisa de ter uma conta (mesmo email: viv.saraiva@gmail.com) criada nos Supabase de:
+- ANIMA
+- Os Sete Véus
+- PITCH
 
-**PITCH:**
-- Crianças activas
-- Nível médio por campo
-- Última sincronização
+### 3. Correr SQL em cada Supabase
 
-### Resumo Diário (20h)
-- Lista de "precisa de atenção" (inactivos, trials a expirar, pagamentos pendentes)
-- Lista de "destaques" (metas atingidas, espelhos completados, breakthroughs)
+A função `is_coach()` e as policies de SELECT precisam de existir em cada projecto.
+
+### 4. Confirmar tabelas (opcional)
+
+Se quiser, correr `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';` em cada Supabase para confirmar que as tabelas documentadas existem.
 
 ---
 
-## RLS Policies Necessárias
+## Plano de Implementação
 
-Para o HUB ler dados dos 4 produtos, precisa de policies `is_coach()` em:
+### Fase 0 — Setup (a Vivianne faz)
+1. Fornecer URLs + anon keys dos 3 Supabase secundários
+2. Criar conta coach em cada Supabase (se não existir)
+3. Correr SQL das policies is_coach() em cada Supabase
 
-### Já existem (hub_controlo_rls.sql)
-- users (SELECT)
-- messenger_conversations (SELECT, UPDATE)
-- messenger_messages (SELECT, INSERT, UPDATE)
-- vitalis_clients (SELECT)
-- vitalis_intake (SELECT)
-- vitalis_alerts (SELECT, UPDATE)
-- vitalis_checkins (SELECT)
-- aurea_clients (SELECT)
-
-### Precisam de ser criadas — ANIMA
-```sql
-CREATE POLICY "Coach sees all user_journey" ON user_journey FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all conversations" ON conversations FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all messages" ON messages FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all user_patterns" ON user_patterns FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all user_insights" ON user_insights FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all user_sessions" ON user_sessions FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all user_streaks" ON user_streaks FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all subscription_events" ON subscription_events FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all daily_usage" ON daily_usage FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all user_milestones" ON user_milestones FOR SELECT USING (is_coach());
-```
-
-### Precisam de ser criadas — Os Sete Véus
-```sql
-CREATE POLICY "Coach sees all profiles" ON profiles FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all reading_progress" ON reading_progress FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all payments" ON payments FOR SELECT USING (is_coach());
-CREATE POLICY "Coach updates payments" ON payments FOR UPDATE USING (is_coach());
-CREATE POLICY "Coach sees all livro_code_requests" ON livro_code_requests FOR SELECT USING (is_coach());
-CREATE POLICY "Coach updates livro_code_requests" ON livro_code_requests FOR UPDATE USING (is_coach());
-CREATE POLICY "Coach sees all livro_codes" ON livro_codes FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all purchases" ON purchases FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all journal_entries" ON journal_entries FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all admin_notifications" ON admin_notifications FOR SELECT USING (is_coach());
-CREATE POLICY "Coach updates admin_notifications" ON admin_notifications FOR UPDATE USING (is_coach());
-```
-
-### Precisam de ser criadas — PITCH
-```sql
-CREATE POLICY "Coach sees all profile_shares" ON profile_shares FOR SELECT USING (is_coach());
-CREATE POLICY "Coach sees all user_data" ON user_data FOR SELECT USING (is_coach());
-```
-
-### Tabela nova — coach_notes
-```sql
-CREATE TABLE coach_notes (
-  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  conteudo text NOT NULL,
-  created_at timestamptz DEFAULT NOW(),
-  updated_at timestamptz DEFAULT NOW()
-);
-
-CREATE POLICY "Coach manages notes" ON coach_notes FOR ALL USING (is_coach());
-```
-
----
-
-## Plano de Implementação (por fases)
-
-### Fase 0 — SQL no Supabase (antes de tocar no código)
-**A Vivianne precisa de correr:**
-1. Policies is_coach() para ANIMA (10 policies)
-2. Policies is_coach() para Os Sete Véus (11 policies)
-3. Policies is_coach() para PITCH (2 policies)
-4. Criar tabela coach_notes (1 tabela + 1 policy)
-5. Verificar se `is_coach()` já existe no Supabase (pode já ter sido criada pelo HUB original)
-
-### Fase 1 — Types + Lib (foundation)
-1. Expandir `types/database.ts` com interfaces para ANIMA, Véus, PITCH
-2. Criar `lib/anima.ts` — queries para user_journey, conversations, user_patterns, user_streaks, user_sessions
-3. Criar `lib/sete-veus.ts` — queries para profiles, reading_progress, payments, livro_code_requests
-4. Criar `lib/pitch.ts` — queries para profile_shares, user_data
-5. Criar `lib/clients.ts` — query unificada cross-produto
-6. Criar `lib/alerts.ts` — CRUD de alertas (marcar lido/resolvido)
-7. Criar `lib/kpis.ts` — cálculos de KPIs por produto
+### Fase 1 — Multi-client + Types (eu faço)
+1. Expandir `lib/supabase.ts` para 4 clients
+2. Expandir `types/database.ts` com interfaces ANIMA, Véus, PITCH
+3. Criar `lib/anima.ts`, `lib/sete-veus.ts`, `lib/pitch.ts`
+4. Criar `lib/clients.ts` (merge por email)
+5. Actualizar `AuthContext.tsx` para multi-auth
 
 ### Fase 2 — Feed Universal
-1. Reescrever `lib/activity.ts` — agregar eventos dos 4 produtos
-2. Adicionar channels realtime para ANIMA, Véus, PITCH
-3. Adicionar filtros no Feed.tsx (por produto, prioridade)
-4. Adicionar acções inline nos alertas (marcar lido/resolvido)
+1. Reescrever `lib/activity.ts` (Sete Ecos real-time + polling dos outros)
+2. Reescrever `Feed.tsx` com filtros por produto
 
 ### Fase 3 — Clientes Cross-Produto
-1. Reescrever `Clients.tsx` — directório unificado
-2. Reescrever `ClientDetail.tsx` — perfil completo com secções por produto
-3. Adicionar filtros por produto e actividade
-4. Adicionar notas da coach
+1. Reescrever `Clients.tsx` com dados dos 4 produtos
+2. Reescrever `ClientDetail.tsx` por email (secções por produto)
 
-### Fase 4 — Dashboard KPIs
-1. Reescrever `Summary.tsx` — KPIs dos 4 produtos
-2. Adicionar MRR por produto
-3. Adicionar lista "precisa de atenção"
-4. Adicionar lista "destaques do dia"
+### Fase 4 — Dashboard
+1. Reescrever `Summary.tsx` com KPIs dos 4 produtos
 
-### Fase 5 — Messenger melhorado
-1. Upload de imagens (Supabase Storage)
-2. Pré-visualização de media recebida
-3. Conversas arquivadas
-4. Search dentro de mensagens
-
-### Fase 6 — Settings + Polish
-1. Página de settings
-2. Error boundaries
-3. Toast notifications para erros
-4. PWA service worker
-5. Paginação nas listas grandes
-
----
-
-## Questões Abertas (precisam de resposta da Vivianne)
-
-1. **Mesmo Supabase?** A ANIMA e Os Sete Véus usam o mesmo projecto Supabase (`vvvdtogvlutrybultffx`) ou têm projectos separados?
-
-2. **Tabela users vs profiles**: A ANIMA usa `users` e Os Sete Véus usa `profiles`. Se são o mesmo Supabase, um cliente com email X tem registos em ambas as tabelas? Ou `profiles` é um alias/view?
-
-3. **Messenger**: O messenger actual é só para Sete Ecos. A ANIMA e Os Sete Véus devem ter messenger também? Ou o Sete Ecos é o único ponto de contacto?
-
-4. **Resumo diário automático**: Queres uma notificação push/email às 20h com o resumo? Ou basta a página Summary com os dados actualizados?
-
-5. **Notas por cliente**: Queres notas simples (texto + data) ou algo mais estruturado (tags, prioridade, lembretes)?
-
-6. **PITCH**: O PITCH está activo e com utilizadores reais, ou ainda em desenvolvimento?
+### Fase 5 — Polish
+1. Error boundaries
+2. Paginação
+3. Messenger melhorado (media)
