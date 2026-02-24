@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Users, Search, ChevronRight } from 'lucide-react'
 import { supabase } from '../lib/supabase'
+import type { Produto } from '../types/database'
 
 interface ClientRow {
   id: string
@@ -11,7 +12,9 @@ interface ClientRow {
   peso_actual: number | null
   peso_meta: number | null
   data_inicio: string | null
-  produto: string
+  produto: Produto
+  produto_label: string
+  extra: string | null
 }
 
 const STATUS_STYLES: Record<string, { label: string; cls: string }> = {
@@ -21,14 +24,34 @@ const STATUS_STYLES: Record<string, { label: string; cls: string }> = {
   pending: { label: 'Pendente', cls: 'bg-hub-warning/20 text-hub-warning' },
   expired: { label: 'Expirado', cls: 'bg-hub-danger/20 text-hub-danger' },
   cancelled: { label: 'Cancelado', cls: 'bg-hub-text-dim/20 text-hub-text-dim' },
+  free: { label: 'Free', cls: 'bg-hub-text-dim/20 text-hub-text-dim' },
+  inactive: { label: 'Inactivo', cls: 'bg-hub-text-dim/20 text-hub-text-dim' },
+  accepted: { label: 'Aceite', cls: 'bg-hub-success/20 text-hub-success' },
+  confirmed: { label: 'Confirmado', cls: 'bg-hub-success/20 text-hub-success' },
 }
+
+const produtoColors: Record<Produto, string> = {
+  sete_ecos: 'bg-purple-500/20 text-purple-300',
+  anima: 'bg-emerald-500/20 text-emerald-300',
+  veus: 'bg-sky-500/20 text-sky-300',
+  pitch: 'bg-amber-500/20 text-amber-300',
+}
+
+const produtoLabels: Record<Produto, string> = {
+  sete_ecos: 'Sete Ecos',
+  anima: 'ANIMA',
+  veus: 'Véus',
+  pitch: 'PITCH',
+}
+
+type ProdutoFilter = 'all' | Produto
 
 export default function Clients() {
   const navigate = useNavigate()
   const [clients, setClients] = useState<ClientRow[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState<string>('all')
+  const [produtoFilter, setProdutoFilter] = useState<ProdutoFilter>('all')
 
   useEffect(() => {
     load()
@@ -38,46 +61,16 @@ export default function Clients() {
     setLoading(true)
     const allClients: ClientRow[] = []
 
-    // Vitalis clients
-    const { data: vitalis } = await supabase
-      .from('vitalis_clients')
-      .select('*, users!vitalis_clients_user_id_fkey(id, nome, email)')
-      .order('created_at', { ascending: false })
+    const results = await Promise.allSettled([
+      loadSeteEcosClients(),
+      loadAnimaClients(),
+      loadVeusClients(),
+      loadPitchClients(),
+    ])
 
-    for (const c of vitalis || []) {
-      const u = (c as any).users
-      allClients.push({
-        id: u?.id || c.user_id,
-        nome: u?.nome || null,
-        email: u?.email || '',
-        subscription_status: c.subscription_status,
-        peso_actual: c.peso_actual,
-        peso_meta: c.peso_meta,
-        data_inicio: c.data_inicio,
-        produto: 'Vitalis',
-      })
-    }
-
-    // Aurea clients
-    const { data: aurea } = await supabase
-      .from('aurea_clients')
-      .select('*, users!aurea_clients_user_id_fkey(id, nome, email)')
-      .order('created_at', { ascending: false })
-
-    for (const c of aurea || []) {
-      const u = (c as any).users
-      // Don't duplicate if already in Vitalis
-      if (!allClients.find(x => x.id === u?.id)) {
-        allClients.push({
-          id: u?.id || c.user_id,
-          nome: u?.nome || null,
-          email: u?.email || '',
-          subscription_status: c.subscription_status,
-          peso_actual: null,
-          peso_meta: null,
-          data_inicio: c.data_inicio || null,
-          produto: 'Aurea',
-        })
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        allClients.push(...result.value)
       }
     }
 
@@ -87,11 +80,11 @@ export default function Clients() {
 
   const filtered = clients.filter((c) => {
     const matchSearch = !search || (c.nome || c.email).toLowerCase().includes(search.toLowerCase())
-    const matchFilter = filter === 'all' || c.subscription_status === filter
-    return matchSearch && matchFilter
+    const matchProduto = produtoFilter === 'all' || c.produto === produtoFilter
+    return matchSearch && matchProduto
   })
 
-  const activeCount = clients.filter(c => ['active', 'trial', 'tester'].includes(c.subscription_status || '')).length
+  const countByProduto = (p: Produto) => clients.filter((c) => c.produto === p).length
 
   return (
     <div className="max-w-lg mx-auto px-4 pt-4">
@@ -103,7 +96,7 @@ export default function Clients() {
         <div>
           <h1 className="text-lg font-bold text-hub-text">Clientes</h1>
           <p className="text-[11px] text-hub-text-dim">
-            {activeCount} activo{activeCount !== 1 ? 's' : ''} &middot; {clients.length} total
+            {clients.length} total
           </p>
         </div>
       </div>
@@ -120,25 +113,28 @@ export default function Clients() {
         />
       </div>
 
-      {/* Filter pills */}
-      <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
-        {[
-          { key: 'all', label: 'Todos' },
-          { key: 'active', label: 'Activos' },
-          { key: 'trial', label: 'Trial' },
-          { key: 'tester', label: 'Testers' },
-          { key: 'expired', label: 'Expirados' },
-        ].map(({ key, label }) => (
+      {/* Product filter */}
+      <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1 -mx-4 px-4 scrollbar-hide">
+        {([
+          { key: 'all' as ProdutoFilter, label: 'Todos' },
+          { key: 'sete_ecos' as ProdutoFilter, label: 'Sete Ecos' },
+          { key: 'anima' as ProdutoFilter, label: 'ANIMA' },
+          { key: 'veus' as ProdutoFilter, label: 'Véus' },
+          { key: 'pitch' as ProdutoFilter, label: 'PITCH' },
+        ]).map(({ key, label }) => (
           <button
             key={key}
-            onClick={() => setFilter(key)}
-            className={`text-xs font-medium px-3 py-1.5 rounded-full whitespace-nowrap transition-colors ${
-              filter === key
-                ? 'bg-hub-accent text-white'
-                : 'bg-hub-surface text-hub-text-muted hover:bg-hub-card'
+            onClick={() => setProdutoFilter(key)}
+            className={`text-xs font-medium px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
+              produtoFilter === key
+                ? 'bg-hub-accent text-hub-bg'
+                : 'bg-hub-surface text-hub-text-muted hover:text-hub-text'
             }`}
           >
             {label}
+            {key !== 'all' && (
+              <span className="ml-1 opacity-60">{countByProduto(key as Produto)}</span>
+            )}
           </button>
         ))}
       </div>
@@ -167,15 +163,16 @@ export default function Clients() {
           {filtered.map((client) => {
             const status = STATUS_STYLES[client.subscription_status || ''] || STATUS_STYLES.cancelled
             const name = client.nome || client.email.split('@')[0]
-            const progresso = client.peso_actual && client.peso_meta
-              ? ((client.peso_actual - client.peso_meta) > 0 ? `${client.peso_actual}kg` : `${client.peso_actual}kg`)
-              : null
 
             return (
               <button
-                key={`${client.id}-${client.produto}`}
-                onClick={() => navigate(`/clientes/${client.id}`)}
-                className="w-full text-left bg-hub-surface rounded-xl p-3.5 hover:bg-hub-card transition-colors"
+                key={`${client.produto}-${client.id}`}
+                onClick={() => {
+                  if (client.produto === 'sete_ecos') navigate(`/clientes/${client.id}`)
+                }}
+                className={`w-full text-left bg-hub-surface rounded-xl p-3.5 hover:bg-hub-card transition-colors ${
+                  client.produto === 'sete_ecos' ? 'cursor-pointer' : 'cursor-default'
+                }`}
               >
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-full bg-hub-card flex items-center justify-center text-sm font-bold text-hub-text-muted flex-shrink-0">
@@ -189,13 +186,17 @@ export default function Clients() {
                       </span>
                     </div>
                     <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-[10px] text-hub-accent">{client.produto}</span>
-                      {progresso && (
-                        <span className="text-[10px] text-hub-text-dim">&middot; {progresso}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md font-medium ${produtoColors[client.produto]}`}>
+                        {produtoLabels[client.produto]}
+                      </span>
+                      {client.extra && (
+                        <span className="text-[10px] text-hub-text-dim">{client.extra}</span>
                       )}
                     </div>
                   </div>
-                  <ChevronRight size={16} className="text-hub-text-dim flex-shrink-0" />
+                  {client.produto === 'sete_ecos' && (
+                    <ChevronRight size={16} className="text-hub-text-dim flex-shrink-0" />
+                  )}
                 </div>
               </button>
             )
@@ -204,4 +205,136 @@ export default function Clients() {
       )}
     </div>
   )
+}
+
+// --- Data loaders ---
+
+async function loadSeteEcosClients(): Promise<ClientRow[]> {
+  const rows: ClientRow[] = []
+
+  const [{ data: vitalis }, { data: aurea }] = await Promise.all([
+    supabase
+      .from('vitalis_clients')
+      .select('*, users!vitalis_clients_user_id_fkey(id, nome, email)')
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('aurea_clients')
+      .select('*, users!aurea_clients_user_id_fkey(id, nome, email)')
+      .order('created_at', { ascending: false }),
+  ])
+
+  const seenIds = new Set<string>()
+
+  for (const c of vitalis || []) {
+    const u = (c as any).users
+    const id = u?.id || c.user_id
+    seenIds.add(id)
+    rows.push({
+      id,
+      nome: u?.nome || null,
+      email: u?.email || '',
+      subscription_status: c.subscription_status,
+      peso_actual: c.peso_actual,
+      peso_meta: c.peso_meta,
+      data_inicio: c.data_inicio,
+      produto: 'sete_ecos',
+      produto_label: 'Vitalis',
+      extra: c.peso_actual ? `${c.peso_actual}kg` : null,
+    })
+  }
+
+  for (const c of aurea || []) {
+    const u = (c as any).users
+    const id = u?.id || c.user_id
+    if (seenIds.has(id)) continue
+    rows.push({
+      id,
+      nome: u?.nome || null,
+      email: u?.email || '',
+      subscription_status: c.subscription_status,
+      peso_actual: null,
+      peso_meta: null,
+      data_inicio: c.data_inicio || null,
+      produto: 'sete_ecos',
+      produto_label: 'Aurea',
+      extra: null,
+    })
+  }
+
+  return rows
+}
+
+async function loadAnimaClients(): Promise<ClientRow[]> {
+  const { data } = await supabase
+    .from('users')
+    .select('id, email, subscription_tier, subscription_status, created_at')
+    .not('subscription_tier', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(100)
+
+  return (data || []).map((u: any) => ({
+    id: u.id,
+    nome: null,
+    email: u.email,
+    subscription_status: u.subscription_status || u.subscription_tier,
+    peso_actual: null,
+    peso_meta: null,
+    data_inicio: u.created_at,
+    produto: 'anima' as Produto,
+    produto_label: u.subscription_tier,
+    extra: u.subscription_tier ? `Tier: ${u.subscription_tier}` : null,
+  }))
+}
+
+async function loadVeusClients(): Promise<ClientRow[]> {
+  const { data } = await supabase
+    .from('profiles')
+    .select('id, email, has_book_access, has_mirrors_access, subscription_status, created_at')
+    .order('created_at', { ascending: false })
+    .limit(100)
+
+  return (data || []).map((p: any) => {
+    const accesses: string[] = []
+    if (p.has_book_access) accesses.push('Livro')
+    if (p.has_mirrors_access) accesses.push('Espelhos')
+    return {
+      id: p.id,
+      nome: null,
+      email: p.email || '',
+      subscription_status: p.has_mirrors_access ? 'active' : p.has_book_access ? 'active' : 'free',
+      peso_actual: null,
+      peso_meta: null,
+      data_inicio: p.created_at,
+      produto: 'veus' as Produto,
+      produto_label: 'Véus',
+      extra: accesses.length > 0 ? accesses.join(' + ') : null,
+    }
+  })
+}
+
+async function loadPitchClients(): Promise<ClientRow[]> {
+  const { data } = await supabase
+    .from('profile_shares')
+    .select('*')
+    .eq('role', 'therapist')
+    .in('status', ['accepted', 'pending'])
+    .order('created_at', { ascending: false })
+    .limit(50)
+
+  return (data || []).map((s: any) => {
+    const pd = s.profile_data || {}
+    const prog = s.progress_data || {}
+    return {
+      id: s.id,
+      nome: pd.name || 'Criança',
+      email: '',
+      subscription_status: s.status,
+      peso_actual: null,
+      peso_meta: null,
+      data_inicio: s.created_at,
+      produto: 'pitch' as Produto,
+      produto_label: 'PITCH',
+      extra: prog.totalStars ? `${prog.totalStars} estrelas` : null,
+    }
+  })
 }

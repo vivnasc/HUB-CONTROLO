@@ -5,25 +5,64 @@ import type { ActivityEvent } from '../types/database'
 export async function fetchActivityFeed(limit = 50): Promise<ActivityEvent[]> {
   const events: ActivityEvent[] = []
 
-  // 1. Vitalis Alerts
-  const { data: alerts } = await supabase
-    .from('vitalis_alerts')
-    .select('*, users!vitalis_alerts_user_id_fkey(nome, email)')
-    .order('created_at', { ascending: false })
-    .limit(20)
+  // Fetch from all products in parallel — each one fails silently if tables don't exist
+  const results = await Promise.allSettled([
+    fetchSeteEcosEvents(),
+    fetchAnimaEvents(),
+    fetchVeusEvents(),
+    fetchPitchEvents(),
+  ])
 
-  for (const a of alerts || []) {
-    const emojiMap: Record<string, string> = {
-      novo_pagamento: '💳',
-      novo_cliente: '🎉',
-      trial_expiring: '⏰',
-      espaco_retorno: '💬',
-      plano_erro: '⚠️',
-      meta_atingida: '🏆',
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      events.push(...result.value)
     }
+  }
+
+  // Sort all events by timestamp descending
+  events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+
+  return events.slice(0, limit)
+}
+
+// --- SETE ECOS ---
+
+async function fetchSeteEcosEvents(): Promise<ActivityEvent[]> {
+  const events: ActivityEvent[] = []
+
+  const [alertsRes, msgsRes, checkinsRes] = await Promise.all([
+    supabase
+      .from('vitalis_alerts')
+      .select('*, users!vitalis_alerts_user_id_fkey(nome, email)')
+      .order('created_at', { ascending: false })
+      .limit(20),
+    supabase
+      .from('messenger_messages')
+      .select('*, messenger_conversations!inner(user_id, users!messenger_conversations_user_id_fkey(nome, email))')
+      .eq('sender_type', 'user')
+      .order('created_at', { ascending: false })
+      .limit(15),
+    supabase
+      .from('vitalis_checkins')
+      .select('*, users!vitalis_checkins_user_id_fkey(nome, email)')
+      .order('created_at', { ascending: false })
+      .limit(15),
+  ])
+
+  // Alerts
+  const emojiMap: Record<string, string> = {
+    novo_pagamento: '💳',
+    novo_cliente: '🎉',
+    trial_expiring: '⏰',
+    espaco_retorno: '💬',
+    plano_erro: '⚠️',
+    meta_atingida: '🏆',
+  }
+  for (const a of alertsRes.data || []) {
     events.push({
       id: `alert-${a.id}`,
       type: 'alerta',
+      produto: 'sete_ecos',
       title: a.descricao,
       detail: null,
       user_id: a.user_id,
@@ -34,19 +73,13 @@ export async function fetchActivityFeed(limit = 50): Promise<ActivityEvent[]> {
     })
   }
 
-  // 2. Recent messenger messages (from clients)
-  const { data: msgs } = await supabase
-    .from('messenger_messages')
-    .select('*, messenger_conversations!inner(user_id, users!messenger_conversations_user_id_fkey(nome, email))')
-    .eq('sender_type', 'user')
-    .order('created_at', { ascending: false })
-    .limit(15)
-
-  for (const m of msgs || []) {
+  // Messages
+  for (const m of msgsRes.data || []) {
     const conv = m.messenger_conversations
     events.push({
       id: `msg-${m.id}`,
       type: 'mensagem',
+      produto: 'sete_ecos',
       title: `Mensagem de ${conv?.users?.nome || 'Cliente'}`,
       detail: m.conteudo?.slice(0, 80) || null,
       user_id: conv?.user_id,
@@ -58,18 +91,13 @@ export async function fetchActivityFeed(limit = 50): Promise<ActivityEvent[]> {
     })
   }
 
-  // 3. Recent Vitalis checkins (weight registrations)
-  const { data: checkins } = await supabase
-    .from('vitalis_checkins')
-    .select('*, users!vitalis_checkins_user_id_fkey(nome, email)')
-    .order('created_at', { ascending: false })
-    .limit(15)
-
-  for (const c of checkins || []) {
+  // Checkins
+  for (const c of checkinsRes.data || []) {
     const hasPeso = c.peso !== null && c.peso !== undefined
     events.push({
       id: `checkin-${c.id}`,
       type: hasPeso ? 'peso' : 'checkin',
+      produto: 'sete_ecos',
       title: hasPeso
         ? `${c.users?.nome || 'Cliente'} registou ${c.peso}kg`
         : `Check-in de ${c.users?.nome || 'Cliente'}`,
@@ -82,13 +110,209 @@ export async function fetchActivityFeed(limit = 50): Promise<ActivityEvent[]> {
     })
   }
 
-  // Sort all events by timestamp descending
-  events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-
-  return events.slice(0, limit)
+  return events
 }
 
-// Subscribe to real-time activity
+// --- ANIMA ---
+
+async function fetchAnimaEvents(): Promise<ActivityEvent[]> {
+  const events: ActivityEvent[] = []
+
+  const [subEventsRes, insightsRes] = await Promise.allSettled([
+    supabase
+      .from('subscription_events')
+      .select('*, users!subscription_events_user_id_fkey(email)')
+      .in('event_type', ['cancelled', 'payment_failed'])
+      .order('created_at', { ascending: false })
+      .limit(10),
+    supabase
+      .from('user_insights')
+      .select('*, users!user_insights_user_id_fkey(email)')
+      .eq('insight_type', 'breakthrough')
+      .order('created_at', { ascending: false })
+      .limit(10),
+  ])
+
+  // Subscription events (cancellations, payment failures)
+  if (subEventsRes.status === 'fulfilled' && subEventsRes.value.data) {
+    for (const e of subEventsRes.value.data) {
+      const isFail = e.event_type === 'payment_failed'
+      events.push({
+        id: `anima-sub-${e.id}`,
+        type: 'subscricao',
+        produto: 'anima',
+        title: isFail ? 'Falha de pagamento ANIMA' : 'Cancelamento ANIMA',
+        detail: e.users?.email || null,
+        user_id: e.user_id,
+        user_name: e.users?.email || null,
+        timestamp: e.created_at,
+        priority: 'critical',
+        emoji: isFail ? '❌' : '🚪',
+      })
+    }
+  }
+
+  // Breakthroughs
+  if (insightsRes.status === 'fulfilled' && insightsRes.value.data) {
+    for (const i of insightsRes.value.data) {
+      events.push({
+        id: `anima-insight-${i.id}`,
+        type: 'insight',
+        produto: 'anima',
+        title: 'Breakthrough na ANIMA',
+        detail: i.insight_text?.slice(0, 80) || null,
+        user_id: i.user_id,
+        user_name: i.users?.email || null,
+        timestamp: i.created_at,
+        priority: 'medium',
+        emoji: '💡',
+      })
+    }
+  }
+
+  return events
+}
+
+// --- OS SETE VÉUS ---
+
+async function fetchVeusEvents(): Promise<ActivityEvent[]> {
+  const events: ActivityEvent[] = []
+
+  const [paymentsRes, codeReqsRes, notifRes] = await Promise.allSettled([
+    supabase
+      .from('payments')
+      .select('*')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(10),
+    supabase
+      .from('livro_code_requests')
+      .select('*')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(10),
+    supabase
+      .from('admin_notifications')
+      .select('*')
+      .eq('read', false)
+      .order('created_at', { ascending: false })
+      .limit(10),
+  ])
+
+  // Pending payments
+  if (paymentsRes.status === 'fulfilled' && paymentsRes.value.data) {
+    for (const p of paymentsRes.value.data) {
+      events.push({
+        id: `veus-pay-${p.id}`,
+        type: 'pagamento',
+        produto: 'veus',
+        title: `Pagamento pendente — ${p.amount} ${p.currency}`,
+        detail: `${p.user_email} via ${p.payment_method}`,
+        user_id: p.user_id,
+        user_name: p.user_email,
+        timestamp: p.created_at,
+        priority: 'critical',
+        emoji: '💰',
+      })
+    }
+  }
+
+  // Code requests
+  if (codeReqsRes.status === 'fulfilled' && codeReqsRes.value.data) {
+    for (const r of codeReqsRes.value.data) {
+      events.push({
+        id: `veus-code-${r.id}`,
+        type: 'codigo',
+        produto: 'veus',
+        title: 'Pedido de código LIVRO',
+        detail: `${r.full_name} (${r.email})`,
+        user_id: '',
+        user_name: r.full_name,
+        timestamp: r.created_at,
+        priority: 'high',
+        emoji: '📖',
+      })
+    }
+  }
+
+  // Admin notifications (skip duplicates)
+  if (notifRes.status === 'fulfilled' && notifRes.value.data) {
+    for (const n of notifRes.value.data) {
+      if (n.type === 'payment_created' || n.type === 'code_request') continue
+      events.push({
+        id: `veus-notif-${n.id}`,
+        type: 'alerta',
+        produto: 'veus',
+        title: n.title,
+        detail: n.message?.slice(0, 80) || null,
+        user_id: '',
+        user_name: null,
+        timestamp: n.created_at,
+        priority: 'medium',
+        emoji: n.type === 'new_member' ? '👋' : n.type === 'code_redeemed' ? '🔓' : '📢',
+      })
+    }
+  }
+
+  return events
+}
+
+// --- PITCH ---
+
+async function fetchPitchEvents(): Promise<ActivityEvent[]> {
+  const events: ActivityEvent[] = []
+
+  const { data } = await supabase
+    .from('profile_shares')
+    .select('*')
+    .eq('status', 'pending')
+    .eq('role', 'therapist')
+    .order('created_at', { ascending: false })
+    .limit(5)
+
+  for (const s of data || []) {
+    const name = (s.profile_data as any)?.name || 'Criança'
+    events.push({
+      id: `pitch-share-${s.id}`,
+      type: 'partilha',
+      produto: 'pitch',
+      title: 'Nova partilha PITCH pendente',
+      detail: name,
+      user_id: s.owner_id,
+      user_name: name,
+      timestamp: s.created_at,
+      priority: 'medium',
+      emoji: '🧒',
+    })
+  }
+
+  return events
+}
+
+// --- ALERT ACTIONS ---
+
+export async function markAlertRead(alertId: string): Promise<void> {
+  await supabase
+    .from('vitalis_alerts')
+    .update({ status: 'lido' })
+    .eq('id', alertId)
+}
+
+export async function markAlertResolved(alertId: string): Promise<void> {
+  await supabase
+    .from('vitalis_alerts')
+    .update({ status: 'resolvido' })
+    .eq('id', alertId)
+}
+
+export async function markVeusNotificationRead(notifId: string): Promise<void> {
+  await supabase
+    .from('admin_notifications')
+    .update({ read: true })
+    .eq('id', notifId)
+}
+
+// Subscribe to real-time activity (Sete Ecos — primary product)
 export function subscribeToActivity(onEvent: (event: ActivityEvent) => void) {
   const channel = supabase
     .channel('hub-activity')
@@ -100,6 +324,7 @@ export function subscribeToActivity(onEvent: (event: ActivityEvent) => void) {
         onEvent({
           id: `alert-${a.id}`,
           type: 'alerta',
+          produto: 'sete_ecos',
           title: a.descricao,
           detail: null,
           user_id: a.user_id,
@@ -118,6 +343,7 @@ export function subscribeToActivity(onEvent: (event: ActivityEvent) => void) {
         onEvent({
           id: `msg-${m.id}`,
           type: 'mensagem',
+          produto: 'sete_ecos',
           title: 'Nova mensagem de cliente',
           detail: m.conteudo?.slice(0, 80) || null,
           user_id: '',
@@ -137,6 +363,7 @@ export function subscribeToActivity(onEvent: (event: ActivityEvent) => void) {
         onEvent({
           id: `checkin-${c.id}`,
           type: c.peso ? 'peso' : 'checkin',
+          produto: 'sete_ecos',
           title: c.peso ? `Cliente registou ${c.peso}kg` : 'Novo check-in',
           detail: null,
           user_id: c.user_id,
