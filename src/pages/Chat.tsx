@@ -10,6 +10,7 @@ import {
   formatDate,
 } from '../lib/messenger'
 import { supabase } from '../lib/supabase'
+import { origemLabel } from '../lib/products'
 import type { MessengerMessage, MessengerConversation } from '../types/database'
 
 export default function Chat() {
@@ -115,7 +116,7 @@ export default function Chat() {
           <div className="min-w-0 flex-1">
             <p className="text-sm font-semibold text-hub-text truncate">{name}</p>
             <p className="text-[10px] text-hub-text-dim">
-              {conv?.origem === 'sete_ecos' ? 'Sete Ecos' : 'Sete Véus'} &middot; {conv?.canal}
+              {conv?.origem ? origemLabel(conv.origem) : ''} &middot; {conv?.canal}
             </p>
           </div>
           <button

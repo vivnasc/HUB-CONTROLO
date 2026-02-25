@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Activity, RefreshCw, LogOut, Check, Eye } from 'lucide-react'
 import { fetchActivityFeed, subscribeToActivity, markAlertRead, markAlertResolved, markVeusNotificationRead } from '../lib/activity'
 import { supabase } from '../lib/supabase'
+import { PRODUCTS, PRODUCT_TABS } from '../lib/products'
 import type { ActivityEvent, Produto } from '../types/database'
 import { timeAgo } from '../lib/messenger'
 
@@ -11,20 +12,6 @@ const priorityColors: Record<string, string> = {
   high: 'border-l-hub-warning',
   medium: 'border-l-hub-accent',
   low: 'border-l-hub-border',
-}
-
-const produtoLabels: Record<Produto, string> = {
-  sete_ecos: 'Sete Ecos',
-  anima: 'ANIMA',
-  veus: 'Véus',
-  pitch: 'PITCH',
-}
-
-const produtoColors: Record<Produto, string> = {
-  sete_ecos: 'bg-purple-500/20 text-purple-300',
-  anima: 'bg-emerald-500/20 text-emerald-300',
-  veus: 'bg-sky-500/20 text-sky-300',
-  pitch: 'bg-amber-500/20 text-amber-300',
 }
 
 type FilterTab = 'todos' | Produto
@@ -94,13 +81,7 @@ export default function Feed() {
 
   const filtered = filter === 'todos' ? events : events.filter((ev) => ev.produto === filter)
 
-  const tabs: { key: FilterTab; label: string }[] = [
-    { key: 'todos', label: 'Todos' },
-    { key: 'sete_ecos', label: 'Sete Ecos' },
-    { key: 'anima', label: 'ANIMA' },
-    { key: 'veus', label: 'Véus' },
-    { key: 'pitch', label: 'PITCH' },
-  ]
+  const tabs = PRODUCT_TABS
 
   return (
     <div className="max-w-lg mx-auto px-4 pt-4 pb-4">
@@ -174,7 +155,7 @@ export default function Feed() {
             <Activity size={28} className="text-hub-text-dim" />
           </div>
           <p className="text-hub-text-muted text-sm">
-            {filter === 'todos' ? 'Sem actividade recente' : `Sem actividade ${produtoLabels[filter as Produto]}`}
+            {filter === 'todos' ? 'Sem actividade recente' : `Sem actividade ${PRODUCTS[filter as Produto].label}`}
           </p>
           <p className="text-hub-text-dim text-xs mt-1">
             Eventos dos teus produtos aparecem aqui em tempo real
@@ -194,8 +175,8 @@ export default function Feed() {
                 <span className="text-lg flex-shrink-0 mt-0.5">{event.emoji}</span>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded-md font-medium ${produtoColors[event.produto]}`}>
-                      {produtoLabels[event.produto]}
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-md font-medium ${PRODUCTS[event.produto].color}`}>
+                      {PRODUCTS[event.produto].label}
                     </span>
                     {event.priority === 'critical' && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-hub-danger/20 text-hub-danger font-medium">

@@ -1,12 +1,11 @@
 import { useState, useEffect } from 'react'
-import { BarChart3, Scale, MessageCircle, AlertTriangle, Users, TrendingDown, RefreshCw, BookOpen, Brain, Gamepad2 } from 'lucide-react'
-import { supabase } from '../lib/supabase'
+import { BarChart3, Scale, MessageCircle, AlertTriangle, Users, TrendingDown, RefreshCw } from 'lucide-react'
+import { seteEcosClient, animaClient, veusClient, pitchClient, PRODUCTS, PRODUCT_LIST } from '../lib/products'
+import type { Produto } from '../types/database'
 
 interface DailySummary {
-  // Global
   messagesUnread: number
   alertsPending: number
-  // Sete Ecos
   seteEcos: {
     totalClients: number
     activeClients: number
@@ -15,21 +14,18 @@ interface DailySummary {
     weightLosses: { nome: string; delta: number }[]
     noCheckIn: { nome: string }[]
   }
-  // ANIMA
   anima: {
     totalUsers: number
     activeUsers: number
     sessionsThisWeek: number
     breakthroughs: number
   }
-  // Véus
   veus: {
     totalReaders: number
     pendingPayments: number
     pendingCodes: number
     chaptersThisWeek: number
   }
-  // PITCH
   pitch: {
     activeChildren: number
     pendingShares: number
@@ -45,7 +41,6 @@ export default function Summary() {
     const today = new Date().toISOString().split('T')[0]
     const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString()
 
-    // All queries in parallel, each failing silently
     const [
       seteEcosRes,
       globalRes,
@@ -55,18 +50,18 @@ export default function Summary() {
     ] = await Promise.allSettled([
       loadSeteEcos(today),
       loadGlobal(),
-      loadAnima(weekAgo),
-      loadVeus(weekAgo),
-      loadPitch(),
+      animaClient ? loadAnima(weekAgo) : Promise.resolve(null),
+      veusClient ? loadVeus(weekAgo) : Promise.resolve(null),
+      pitchClient ? loadPitch() : Promise.resolve(null),
     ])
 
     const seteEcos = seteEcosRes.status === 'fulfilled' ? seteEcosRes.value : {
       totalClients: 0, activeClients: 0, checkinsToday: 0, weighInsToday: 0, weightLosses: [], noCheckIn: [],
     }
     const global = globalRes.status === 'fulfilled' ? globalRes.value : { messagesUnread: 0, alertsPending: 0 }
-    const anima = animaRes.status === 'fulfilled' ? animaRes.value : { totalUsers: 0, activeUsers: 0, sessionsThisWeek: 0, breakthroughs: 0 }
-    const veus = veusRes.status === 'fulfilled' ? veusRes.value : { totalReaders: 0, pendingPayments: 0, pendingCodes: 0, chaptersThisWeek: 0 }
-    const pitch = pitchRes.status === 'fulfilled' ? pitchRes.value : { activeChildren: 0, pendingShares: 0 }
+    const anima = animaRes.status === 'fulfilled' && animaRes.value ? animaRes.value : { totalUsers: 0, activeUsers: 0, sessionsThisWeek: 0, breakthroughs: 0 }
+    const veus = veusRes.status === 'fulfilled' && veusRes.value ? veusRes.value : { totalReaders: 0, pendingPayments: 0, pendingCodes: 0, chaptersThisWeek: 0 }
+    const pitch = pitchRes.status === 'fulfilled' && pitchRes.value ? pitchRes.value : { activeChildren: 0, pendingShares: 0 }
 
     setSummary({ ...global, seteEcos, anima, veus, pitch })
     setLoading(false)
@@ -135,20 +130,40 @@ export default function Summary() {
             />
           </div>
 
-          {/* SETE ECOS */}
-          <SectionHeader icon={<Scale size={14} />} label="Sete Ecos" color="text-purple-300" bgColor="bg-purple-500/20" />
+          {/* Per-product sections using registry */}
+          {PRODUCT_LIST.map((prod) => (
+            <ProductSection key={prod.key} produto={prod.key} summary={summary} />
+          ))}
+        </>
+      )}
+    </div>
+  )
+}
+
+// --- Per-product section renderer ---
+
+function ProductSection({ produto, summary }: { produto: Produto; summary: DailySummary }) {
+  const config = PRODUCTS[produto]
+  const { Icon } = config
+
+  switch (produto) {
+    case 'sete_ecos': {
+      const d = summary.seteEcos
+      return (
+        <>
+          <SectionHeader icon={<Icon size={14} />} label={config.label} color={config.iconColor} bgColor={config.iconBg} />
           <div className="grid grid-cols-2 gap-2 mb-2">
-            <StatCard icon={<Users size={14} />} label="Activos" value={summary.seteEcos.activeClients} subtext={`${summary.seteEcos.totalClients} total`} color="text-purple-300" />
-            <StatCard icon={<Scale size={14} />} label="Check-ins hoje" value={summary.seteEcos.checkinsToday} subtext={`${summary.seteEcos.weighInsToday} com peso`} color="text-hub-success" />
+            <StatCard icon={<Users size={14} />} label="Activos" value={d.activeClients} subtext={`${d.totalClients} total`} color={config.iconColor} />
+            <StatCard icon={<Scale size={14} />} label="Check-ins hoje" value={d.checkinsToday} subtext={`${d.weighInsToday} com peso`} color="text-hub-success" />
           </div>
-          {summary.seteEcos.weightLosses.length > 0 && (
+          {d.weightLosses.length > 0 && (
             <div className="bg-hub-surface rounded-xl p-3.5 border border-hub-border mb-2">
               <div className="flex items-center gap-2 mb-2">
                 <TrendingDown size={14} className="text-hub-success" />
                 <span className="text-[10px] text-hub-text-dim uppercase tracking-wider font-semibold">Perdas de peso</span>
               </div>
               <div className="space-y-1.5">
-                {summary.seteEcos.weightLosses.map((w, i) => (
+                {d.weightLosses.map((w, i) => (
                   <div key={i} className="flex items-center justify-between">
                     <span className="text-xs text-hub-text">{w.nome}</span>
                     <span className="text-xs font-bold text-hub-success">-{w.delta}kg</span>
@@ -157,68 +172,87 @@ export default function Summary() {
               </div>
             </div>
           )}
-          {summary.seteEcos.noCheckIn.length > 0 && (
+          {d.noCheckIn.length > 0 && (
             <div className="bg-hub-surface rounded-xl p-3.5 border border-hub-border mb-4">
               <div className="flex items-center gap-2 mb-2">
                 <AlertTriangle size={14} className="text-hub-warning" />
-                <span className="text-[10px] text-hub-text-dim uppercase tracking-wider font-semibold">Sem check-in hoje ({summary.seteEcos.noCheckIn.length})</span>
+                <span className="text-[10px] text-hub-text-dim uppercase tracking-wider font-semibold">Sem check-in hoje ({d.noCheckIn.length})</span>
               </div>
               <div className="flex flex-wrap gap-1.5">
-                {summary.seteEcos.noCheckIn.map((c, i) => (
+                {d.noCheckIn.map((c, i) => (
                   <span key={i} className="text-[10px] bg-hub-warning/10 text-hub-warning px-2 py-0.5 rounded-lg">{c.nome}</span>
                 ))}
               </div>
             </div>
           )}
-
-          {/* ANIMA */}
-          <SectionHeader icon={<Brain size={14} />} label="ANIMA" color="text-emerald-300" bgColor="bg-emerald-500/20" />
+        </>
+      )
+    }
+    case 'anima': {
+      const d = summary.anima
+      if (!animaClient) return null
+      return (
+        <>
+          <SectionHeader icon={<Icon size={14} />} label={config.label} color={config.iconColor} bgColor={config.iconBg} />
           <div className="grid grid-cols-2 gap-2 mb-4">
-            <StatCard icon={<Users size={14} />} label="Activos" value={summary.anima.activeUsers} subtext={`${summary.anima.totalUsers} total`} color="text-emerald-300" />
-            <StatCard icon={<Brain size={14} />} label="Sessões semana" value={summary.anima.sessionsThisWeek} subtext={`${summary.anima.breakthroughs} breakthroughs`} color="text-emerald-300" />
-          </div>
-
-          {/* VÉUS */}
-          <SectionHeader icon={<BookOpen size={14} />} label="Os Sete Véus" color="text-sky-300" bgColor="bg-sky-500/20" />
-          <div className="grid grid-cols-2 gap-2 mb-4">
-            <StatCard icon={<Users size={14} />} label="Leitoras" value={summary.veus.totalReaders} subtext={`${summary.veus.chaptersThisWeek} caps/semana`} color="text-sky-300" />
-            <StatCard icon={<AlertTriangle size={14} />} label="Pendentes" value={summary.veus.pendingPayments + summary.veus.pendingCodes} subtext={`${summary.veus.pendingPayments} pag. + ${summary.veus.pendingCodes} códigos`} color="text-sky-300" alert={(summary.veus.pendingPayments + summary.veus.pendingCodes) > 0} />
-          </div>
-
-          {/* PITCH */}
-          <SectionHeader icon={<Gamepad2 size={14} />} label="PITCH" color="text-amber-300" bgColor="bg-amber-500/20" />
-          <div className="grid grid-cols-2 gap-2 mb-4">
-            <StatCard icon={<Users size={14} />} label="Crianças" value={summary.pitch.activeChildren} color="text-amber-300" />
-            <StatCard icon={<AlertTriangle size={14} />} label="Partilhas pend." value={summary.pitch.pendingShares} color="text-amber-300" alert={summary.pitch.pendingShares > 0} />
+            <StatCard icon={<Users size={14} />} label="Activos" value={d.activeUsers} subtext={`${d.totalUsers} total`} color={config.iconColor} />
+            <StatCard icon={<Icon size={14} />} label="Sessões semana" value={d.sessionsThisWeek} subtext={`${d.breakthroughs} breakthroughs`} color={config.iconColor} />
           </div>
         </>
-      )}
-    </div>
-  )
+      )
+    }
+    case 'veus': {
+      const d = summary.veus
+      if (!veusClient) return null
+      return (
+        <>
+          <SectionHeader icon={<Icon size={14} />} label={config.label} color={config.iconColor} bgColor={config.iconBg} />
+          <div className="grid grid-cols-2 gap-2 mb-4">
+            <StatCard icon={<Users size={14} />} label="Leitoras" value={d.totalReaders} subtext={`${d.chaptersThisWeek} caps/semana`} color={config.iconColor} />
+            <StatCard icon={<AlertTriangle size={14} />} label="Pendentes" value={d.pendingPayments + d.pendingCodes} subtext={`${d.pendingPayments} pag. + ${d.pendingCodes} códigos`} color={config.iconColor} alert={(d.pendingPayments + d.pendingCodes) > 0} />
+          </div>
+        </>
+      )
+    }
+    case 'pitch': {
+      const d = summary.pitch
+      if (!pitchClient) return null
+      return (
+        <>
+          <SectionHeader icon={<Icon size={14} />} label={config.label} color={config.iconColor} bgColor={config.iconBg} />
+          <div className="grid grid-cols-2 gap-2 mb-4">
+            <StatCard icon={<Users size={14} />} label="Crianças" value={d.activeChildren} color={config.iconColor} />
+            <StatCard icon={<AlertTriangle size={14} />} label="Partilhas pend." value={d.pendingShares} color={config.iconColor} alert={d.pendingShares > 0} />
+          </div>
+        </>
+      )
+    }
+  }
 }
 
-// --- Data loading helpers ---
+// --- Data loading helpers (each uses its own Supabase client) ---
 
 async function loadGlobal() {
   const [unreadConvs, { count: alertsPending }] = await Promise.all([
-    supabase.from('messenger_conversations').select('unread_coach').eq('status', 'activa').gt('unread_coach', 0),
-    supabase.from('vitalis_alerts').select('*', { count: 'exact', head: true }).eq('status', 'pendente'),
+    seteEcosClient.from('messenger_conversations').select('unread_coach').eq('status', 'activa').gt('unread_coach', 0),
+    seteEcosClient.from('vitalis_alerts').select('*', { count: 'exact', head: true }).eq('status', 'pendente'),
   ])
   const messagesUnread = (unreadConvs.data || []).reduce((sum, c: any) => sum + (c.unread_coach || 0), 0)
   return { messagesUnread, alertsPending: alertsPending || 0 }
 }
 
 async function loadSeteEcos(today: string) {
+  const sb = seteEcosClient
   const [
     { count: totalClients },
     { count: activeClients },
     { data: checkinsToday },
     { data: allClients },
   ] = await Promise.all([
-    supabase.from('vitalis_clients').select('*', { count: 'exact', head: true }),
-    supabase.from('vitalis_clients').select('*', { count: 'exact', head: true }).in('subscription_status', ['active', 'trial', 'tester']),
-    supabase.from('vitalis_checkins').select('id, peso, user_id').gte('created_at', `${today}T00:00:00`),
-    supabase.from('vitalis_clients').select('user_id, peso_actual, peso_inicial, users!vitalis_clients_user_id_fkey(nome)').in('subscription_status', ['active', 'trial', 'tester']),
+    sb.from('vitalis_clients').select('*', { count: 'exact', head: true }),
+    sb.from('vitalis_clients').select('*', { count: 'exact', head: true }).in('subscription_status', ['active', 'trial', 'tester']),
+    sb.from('vitalis_checkins').select('id, peso, user_id').gte('created_at', `${today}T00:00:00`),
+    sb.from('vitalis_clients').select('user_id, peso_actual, peso_inicial, users!vitalis_clients_user_id_fkey(nome)').in('subscription_status', ['active', 'trial', 'tester']),
   ])
 
   const weighIns = (checkinsToday || []).filter((c: any) => c.peso)
@@ -245,16 +279,18 @@ async function loadSeteEcos(today: string) {
 }
 
 async function loadAnima(weekAgo: string) {
+  if (!animaClient) return null
+  const sb = animaClient
   const [
     { count: totalUsers },
     { count: activeUsers },
     { count: sessionsThisWeek },
     { count: breakthroughs },
   ] = await Promise.all([
-    supabase.from('users').select('*', { count: 'exact', head: true }).not('subscription_tier', 'is', null),
-    supabase.from('users').select('*', { count: 'exact', head: true }).eq('subscription_status', 'active').not('subscription_tier', 'is', null),
-    supabase.from('user_sessions').select('*', { count: 'exact', head: true }).gte('created_at', weekAgo),
-    supabase.from('user_insights').select('*', { count: 'exact', head: true }).eq('insight_type', 'breakthrough').gte('created_at', weekAgo),
+    sb.from('users').select('*', { count: 'exact', head: true }).not('subscription_tier', 'is', null),
+    sb.from('users').select('*', { count: 'exact', head: true }).eq('subscription_status', 'active').not('subscription_tier', 'is', null),
+    sb.from('user_sessions').select('*', { count: 'exact', head: true }).gte('created_at', weekAgo),
+    sb.from('user_insights').select('*', { count: 'exact', head: true }).eq('insight_type', 'breakthrough').gte('created_at', weekAgo),
   ])
   return {
     totalUsers: totalUsers || 0,
@@ -265,16 +301,18 @@ async function loadAnima(weekAgo: string) {
 }
 
 async function loadVeus(weekAgo: string) {
+  if (!veusClient) return null
+  const sb = veusClient
   const [
     { count: totalReaders },
     { count: pendingPayments },
     { count: pendingCodes },
     { count: chaptersThisWeek },
   ] = await Promise.all([
-    supabase.from('profiles').select('*', { count: 'exact', head: true }),
-    supabase.from('payments').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
-    supabase.from('livro_code_requests').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
-    supabase.from('reading_progress').select('*', { count: 'exact', head: true }).eq('completed', true).gte('updated_at', weekAgo),
+    sb.from('profiles').select('*', { count: 'exact', head: true }),
+    sb.from('payments').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+    sb.from('livro_code_requests').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+    sb.from('reading_progress').select('*', { count: 'exact', head: true }).eq('completed', true).gte('updated_at', weekAgo),
   ])
   return {
     totalReaders: totalReaders || 0,
@@ -285,12 +323,14 @@ async function loadVeus(weekAgo: string) {
 }
 
 async function loadPitch() {
+  if (!pitchClient) return null
+  const sb = pitchClient
   const [
     { count: activeChildren },
     { count: pendingShares },
   ] = await Promise.all([
-    supabase.from('profile_shares').select('*', { count: 'exact', head: true }).eq('role', 'therapist').eq('status', 'accepted'),
-    supabase.from('profile_shares').select('*', { count: 'exact', head: true }).eq('role', 'therapist').eq('status', 'pending'),
+    sb.from('profile_shares').select('*', { count: 'exact', head: true }).eq('role', 'therapist').eq('status', 'accepted'),
+    sb.from('profile_shares').select('*', { count: 'exact', head: true }).eq('role', 'therapist').eq('status', 'pending'),
   ])
   return {
     activeChildren: activeChildren || 0,

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { MessageCircle, Search } from 'lucide-react'
 import { getConversations, subscribeToConversations, timeAgo } from '../lib/messenger'
 import { supabase } from '../lib/supabase'
+import { origemLabel, origemColor } from '../lib/products'
 import type { MessengerConversation } from '../types/database'
 
 export default function Messenger() {
@@ -137,12 +138,8 @@ export default function Messenger() {
 
                 {/* Origin badge */}
                 <div className="flex items-center gap-1.5 mt-2 ml-[52px]">
-                  <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${
-                    conv.origem === 'sete_ecos'
-                      ? 'bg-purple-500/20 text-purple-300'
-                      : 'bg-blue-500/20 text-blue-300'
-                  }`}>
-                    {conv.origem === 'sete_ecos' ? 'Sete Ecos' : 'Sete Véus'}
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${origemColor(conv.origem)}`}>
+                    {origemLabel(conv.origem)}
                   </span>
                   <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${
                     conv.canal === 'pessoal'

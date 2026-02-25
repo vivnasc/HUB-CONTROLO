@@ -1,16 +1,15 @@
-import { supabase } from './supabase'
+import { seteEcosClient, animaClient, veusClient, pitchClient } from './products'
 import type { ActivityEvent } from '../types/database'
 
 // Fetch recent activity across all products
 export async function fetchActivityFeed(limit = 50): Promise<ActivityEvent[]> {
   const events: ActivityEvent[] = []
 
-  // Fetch from all products in parallel — each one fails silently if tables don't exist
   const results = await Promise.allSettled([
     fetchSeteEcosEvents(),
-    fetchAnimaEvents(),
-    fetchVeusEvents(),
-    fetchPitchEvents(),
+    animaClient ? fetchAnimaEvents() : Promise.resolve([]),
+    veusClient ? fetchVeusEvents() : Promise.resolve([]),
+    pitchClient ? fetchPitchEvents() : Promise.resolve([]),
   ])
 
   for (const result of results) {
@@ -19,37 +18,35 @@ export async function fetchActivityFeed(limit = 50): Promise<ActivityEvent[]> {
     }
   }
 
-  // Sort all events by timestamp descending
   events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-
   return events.slice(0, limit)
 }
 
-// --- SETE ECOS ---
+// --- SETE ECOS (uses main client) ---
 
 async function fetchSeteEcosEvents(): Promise<ActivityEvent[]> {
   const events: ActivityEvent[] = []
+  const sb = seteEcosClient
 
   const [alertsRes, msgsRes, checkinsRes] = await Promise.all([
-    supabase
+    sb
       .from('vitalis_alerts')
       .select('*, users!vitalis_alerts_user_id_fkey(nome, email)')
       .order('created_at', { ascending: false })
       .limit(20),
-    supabase
+    sb
       .from('messenger_messages')
       .select('*, messenger_conversations!inner(user_id, users!messenger_conversations_user_id_fkey(nome, email))')
       .eq('sender_type', 'user')
       .order('created_at', { ascending: false })
       .limit(15),
-    supabase
+    sb
       .from('vitalis_checkins')
       .select('*, users!vitalis_checkins_user_id_fkey(nome, email)')
       .order('created_at', { ascending: false })
       .limit(15),
   ])
 
-  // Alerts
   const emojiMap: Record<string, string> = {
     novo_pagamento: '💳',
     novo_cliente: '🎉',
@@ -73,7 +70,6 @@ async function fetchSeteEcosEvents(): Promise<ActivityEvent[]> {
     })
   }
 
-  // Messages
   for (const m of msgsRes.data || []) {
     const conv = m.messenger_conversations
     events.push({
@@ -91,7 +87,6 @@ async function fetchSeteEcosEvents(): Promise<ActivityEvent[]> {
     })
   }
 
-  // Checkins
   for (const c of checkinsRes.data || []) {
     const hasPeso = c.peso !== null && c.peso !== undefined
     events.push({
@@ -113,19 +108,21 @@ async function fetchSeteEcosEvents(): Promise<ActivityEvent[]> {
   return events
 }
 
-// --- ANIMA ---
+// --- ANIMA (uses animaClient) ---
 
 async function fetchAnimaEvents(): Promise<ActivityEvent[]> {
+  if (!animaClient) return []
   const events: ActivityEvent[] = []
+  const sb = animaClient
 
   const [subEventsRes, insightsRes] = await Promise.allSettled([
-    supabase
+    sb
       .from('subscription_events')
       .select('*, users!subscription_events_user_id_fkey(email)')
       .in('event_type', ['cancelled', 'payment_failed'])
       .order('created_at', { ascending: false })
       .limit(10),
-    supabase
+    sb
       .from('user_insights')
       .select('*, users!user_insights_user_id_fkey(email)')
       .eq('insight_type', 'breakthrough')
@@ -133,7 +130,6 @@ async function fetchAnimaEvents(): Promise<ActivityEvent[]> {
       .limit(10),
   ])
 
-  // Subscription events (cancellations, payment failures)
   if (subEventsRes.status === 'fulfilled' && subEventsRes.value.data) {
     for (const e of subEventsRes.value.data) {
       const isFail = e.event_type === 'payment_failed'
@@ -152,7 +148,6 @@ async function fetchAnimaEvents(): Promise<ActivityEvent[]> {
     }
   }
 
-  // Breakthroughs
   if (insightsRes.status === 'fulfilled' && insightsRes.value.data) {
     for (const i of insightsRes.value.data) {
       events.push({
@@ -173,25 +168,27 @@ async function fetchAnimaEvents(): Promise<ActivityEvent[]> {
   return events
 }
 
-// --- OS SETE VÉUS ---
+// --- OS SETE VÉUS (uses veusClient) ---
 
 async function fetchVeusEvents(): Promise<ActivityEvent[]> {
+  if (!veusClient) return []
   const events: ActivityEvent[] = []
+  const sb = veusClient
 
   const [paymentsRes, codeReqsRes, notifRes] = await Promise.allSettled([
-    supabase
+    sb
       .from('payments')
       .select('*')
       .eq('status', 'pending')
       .order('created_at', { ascending: false })
       .limit(10),
-    supabase
+    sb
       .from('livro_code_requests')
       .select('*')
       .eq('status', 'pending')
       .order('created_at', { ascending: false })
       .limit(10),
-    supabase
+    sb
       .from('admin_notifications')
       .select('*')
       .eq('read', false)
@@ -199,7 +196,6 @@ async function fetchVeusEvents(): Promise<ActivityEvent[]> {
       .limit(10),
   ])
 
-  // Pending payments
   if (paymentsRes.status === 'fulfilled' && paymentsRes.value.data) {
     for (const p of paymentsRes.value.data) {
       events.push({
@@ -217,7 +213,6 @@ async function fetchVeusEvents(): Promise<ActivityEvent[]> {
     }
   }
 
-  // Code requests
   if (codeReqsRes.status === 'fulfilled' && codeReqsRes.value.data) {
     for (const r of codeReqsRes.value.data) {
       events.push({
@@ -235,7 +230,6 @@ async function fetchVeusEvents(): Promise<ActivityEvent[]> {
     }
   }
 
-  // Admin notifications (skip duplicates)
   if (notifRes.status === 'fulfilled' && notifRes.value.data) {
     for (const n of notifRes.value.data) {
       if (n.type === 'payment_created' || n.type === 'code_request') continue
@@ -257,12 +251,14 @@ async function fetchVeusEvents(): Promise<ActivityEvent[]> {
   return events
 }
 
-// --- PITCH ---
+// --- PITCH (uses pitchClient) ---
 
 async function fetchPitchEvents(): Promise<ActivityEvent[]> {
+  if (!pitchClient) return []
+  const sb = pitchClient
   const events: ActivityEvent[] = []
 
-  const { data } = await supabase
+  const { data } = await sb
     .from('profile_shares')
     .select('*')
     .eq('status', 'pending')
@@ -292,29 +288,30 @@ async function fetchPitchEvents(): Promise<ActivityEvent[]> {
 // --- ALERT ACTIONS ---
 
 export async function markAlertRead(alertId: string): Promise<void> {
-  await supabase
+  await seteEcosClient
     .from('vitalis_alerts')
     .update({ status: 'lido' })
     .eq('id', alertId)
 }
 
 export async function markAlertResolved(alertId: string): Promise<void> {
-  await supabase
+  await seteEcosClient
     .from('vitalis_alerts')
     .update({ status: 'resolvido' })
     .eq('id', alertId)
 }
 
 export async function markVeusNotificationRead(notifId: string): Promise<void> {
-  await supabase
+  if (!veusClient) return
+  await veusClient
     .from('admin_notifications')
     .update({ read: true })
     .eq('id', notifId)
 }
 
-// Subscribe to real-time activity (Sete Ecos — primary product)
+// Subscribe to real-time activity (Sete Ecos only — primary product with auth)
 export function subscribeToActivity(onEvent: (event: ActivityEvent) => void) {
-  const channel = supabase
+  const channel = seteEcosClient
     .channel('hub-activity')
     .on(
       'postgres_changes',

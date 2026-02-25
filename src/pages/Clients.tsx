@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Users, Search, ChevronRight } from 'lucide-react'
-import { supabase } from '../lib/supabase'
+import { seteEcosClient, animaClient, veusClient, pitchClient, PRODUCTS, PRODUCT_TABS } from '../lib/products'
 import type { Produto } from '../types/database'
 
 interface ClientRow {
@@ -30,28 +30,14 @@ const STATUS_STYLES: Record<string, { label: string; cls: string }> = {
   confirmed: { label: 'Confirmado', cls: 'bg-hub-success/20 text-hub-success' },
 }
 
-const produtoColors: Record<Produto, string> = {
-  sete_ecos: 'bg-purple-500/20 text-purple-300',
-  anima: 'bg-emerald-500/20 text-emerald-300',
-  veus: 'bg-sky-500/20 text-sky-300',
-  pitch: 'bg-amber-500/20 text-amber-300',
-}
-
-const produtoLabels: Record<Produto, string> = {
-  sete_ecos: 'Sete Ecos',
-  anima: 'ANIMA',
-  veus: 'Véus',
-  pitch: 'PITCH',
-}
-
-type ProdutoFilter = 'all' | Produto
+type ProdutoFilter = 'todos' | Produto
 
 export default function Clients() {
   const navigate = useNavigate()
   const [clients, setClients] = useState<ClientRow[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [produtoFilter, setProdutoFilter] = useState<ProdutoFilter>('all')
+  const [produtoFilter, setProdutoFilter] = useState<ProdutoFilter>('todos')
 
   useEffect(() => {
     load()
@@ -63,9 +49,9 @@ export default function Clients() {
 
     const results = await Promise.allSettled([
       loadSeteEcosClients(),
-      loadAnimaClients(),
-      loadVeusClients(),
-      loadPitchClients(),
+      animaClient ? loadAnimaClients() : Promise.resolve([]),
+      veusClient ? loadVeusClients() : Promise.resolve([]),
+      pitchClient ? loadPitchClients() : Promise.resolve([]),
     ])
 
     for (const result of results) {
@@ -80,7 +66,7 @@ export default function Clients() {
 
   const filtered = clients.filter((c) => {
     const matchSearch = !search || (c.nome || c.email).toLowerCase().includes(search.toLowerCase())
-    const matchProduto = produtoFilter === 'all' || c.produto === produtoFilter
+    const matchProduto = produtoFilter === 'todos' || c.produto === produtoFilter
     return matchSearch && matchProduto
   })
 
@@ -113,18 +99,12 @@ export default function Clients() {
         />
       </div>
 
-      {/* Product filter */}
+      {/* Product filter — from registry */}
       <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1 -mx-4 px-4 scrollbar-hide">
-        {([
-          { key: 'all' as ProdutoFilter, label: 'Todos' },
-          { key: 'sete_ecos' as ProdutoFilter, label: 'Sete Ecos' },
-          { key: 'anima' as ProdutoFilter, label: 'ANIMA' },
-          { key: 'veus' as ProdutoFilter, label: 'Véus' },
-          { key: 'pitch' as ProdutoFilter, label: 'PITCH' },
-        ]).map(({ key, label }) => (
+        {PRODUCT_TABS.map(({ key, label }) => (
           <button
             key={key}
-            onClick={() => setProdutoFilter(key)}
+            onClick={() => setProdutoFilter(key as ProdutoFilter)}
             className={`text-xs font-medium px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
               produtoFilter === key
                 ? 'bg-hub-accent text-hub-bg'
@@ -132,7 +112,7 @@ export default function Clients() {
             }`}
           >
             {label}
-            {key !== 'all' && (
+            {key !== 'todos' && (
               <span className="ml-1 opacity-60">{countByProduto(key as Produto)}</span>
             )}
           </button>
@@ -163,15 +143,17 @@ export default function Clients() {
           {filtered.map((client) => {
             const status = STATUS_STYLES[client.subscription_status || ''] || STATUS_STYLES.cancelled
             const name = client.nome || client.email.split('@')[0]
+            const config = PRODUCTS[client.produto]
+            const clickable = config.hasDetailPage
 
             return (
               <button
                 key={`${client.produto}-${client.id}`}
                 onClick={() => {
-                  if (client.produto === 'sete_ecos') navigate(`/clientes/${client.id}`)
+                  if (clickable) navigate(`/clientes/${client.id}`)
                 }}
                 className={`w-full text-left bg-hub-surface rounded-xl p-3.5 hover:bg-hub-card transition-colors ${
-                  client.produto === 'sete_ecos' ? 'cursor-pointer' : 'cursor-default'
+                  clickable ? 'cursor-pointer' : 'cursor-default'
                 }`}
               >
                 <div className="flex items-center gap-3">
@@ -186,15 +168,15 @@ export default function Clients() {
                       </span>
                     </div>
                     <div className="flex items-center gap-2 mt-0.5">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md font-medium ${produtoColors[client.produto]}`}>
-                        {produtoLabels[client.produto]}
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md font-medium ${config.color}`}>
+                        {config.label}
                       </span>
                       {client.extra && (
                         <span className="text-[10px] text-hub-text-dim">{client.extra}</span>
                       )}
                     </div>
                   </div>
-                  {client.produto === 'sete_ecos' && (
+                  {clickable && (
                     <ChevronRight size={16} className="text-hub-text-dim flex-shrink-0" />
                   )}
                 </div>
@@ -207,17 +189,18 @@ export default function Clients() {
   )
 }
 
-// --- Data loaders ---
+// --- Data loaders (each uses its own Supabase client) ---
 
 async function loadSeteEcosClients(): Promise<ClientRow[]> {
   const rows: ClientRow[] = []
+  const sb = seteEcosClient
 
   const [{ data: vitalis }, { data: aurea }] = await Promise.all([
-    supabase
+    sb
       .from('vitalis_clients')
       .select('*, users!vitalis_clients_user_id_fkey(id, nome, email)')
       .order('created_at', { ascending: false }),
-    supabase
+    sb
       .from('aurea_clients')
       .select('*, users!aurea_clients_user_id_fkey(id, nome, email)')
       .order('created_at', { ascending: false }),
@@ -265,7 +248,8 @@ async function loadSeteEcosClients(): Promise<ClientRow[]> {
 }
 
 async function loadAnimaClients(): Promise<ClientRow[]> {
-  const { data } = await supabase
+  if (!animaClient) return []
+  const { data } = await animaClient
     .from('users')
     .select('id, email, subscription_tier, subscription_status, created_at')
     .not('subscription_tier', 'is', null)
@@ -287,7 +271,8 @@ async function loadAnimaClients(): Promise<ClientRow[]> {
 }
 
 async function loadVeusClients(): Promise<ClientRow[]> {
-  const { data } = await supabase
+  if (!veusClient) return []
+  const { data } = await veusClient
     .from('profiles')
     .select('id, email, has_book_access, has_mirrors_access, subscription_status, created_at')
     .order('created_at', { ascending: false })
@@ -313,7 +298,8 @@ async function loadVeusClients(): Promise<ClientRow[]> {
 }
 
 async function loadPitchClients(): Promise<ClientRow[]> {
-  const { data } = await supabase
+  if (!pitchClient) return []
+  const { data } = await pitchClient
     .from('profile_shares')
     .select('*')
     .eq('role', 'therapist')

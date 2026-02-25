@@ -1,14 +1,3 @@
-import { createClient } from '@supabase/supabase-js'
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-    storageKey: 'hub-controlo-auth',
-    storage: window.localStorage,
-  },
-})
+// Re-export the main Sete Ecos client as `supabase` for backward compat
+// (messenger, auth, unread count, etc. all use this)
+export { seteEcosClient as supabase } from './products'
